@@ -4,6 +4,7 @@ import re
 import string
 import math
 import os
+import requests
 from datetime import datetime
 
 # ============================================================
@@ -301,6 +302,11 @@ st.markdown("""
 
 MODEL_PATH = "fake_news_model.pkl"
 VECTORIZER_PATH = "tfidf_vectorizer.pkl"
+# ============================================================
+# GOOGLE FACT CHECK API
+# ============================================================
+
+FACT_CHECK_API_KEY = st.secrets["FACT_CHECK_API_KEY"]
 
 
 @st.cache_resource(show_spinner=False)
@@ -328,7 +334,138 @@ def clean_text(text: str) -> str:
     text = re.sub(r"\d+", "", text)                           # numbers
     text = re.sub(r"\s+", " ", text).strip()                  # extra spaces
     return text
+# ============================================================
+# GOOGLE FACT CHECKING
+# ============================================================
 
+def search_fact_checks(claim):
+
+    url = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
+
+    params = {
+        "query": claim,
+        "languageCode": "en",
+        "pageSize": 10,
+        "key": FACT_CHECK_API_KEY
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+
+        return data.get("claims", [])
+
+    except Exception:
+        return []
+
+
+def fact_check_news(news):
+
+    claim = news.strip()
+
+    if len(claim) > 500:
+        claim = claim[:500]
+
+    results = search_fact_checks(claim)
+
+    if not results:
+        return {
+            "status": "UNVERIFIED",
+            "reason": "No matching fact-check was found.",
+            "evidence": []
+        }
+
+    evidence = []
+
+    for item in results:
+
+        claim_text = item.get("text", "")
+
+        reviews = item.get("claimReview", [])
+
+        for review in reviews:
+
+            publisher = review.get("publisher", {})
+
+            evidence.append({
+                "claim": claim_text,
+                "publisher": publisher.get(
+                    "name",
+                    "Unknown"
+                ),
+                "rating": review.get(
+                    "textualRating",
+                    "Unknown"
+                ),
+                "review_title": review.get(
+                    "title",
+                    ""
+                ),
+                "url": review.get(
+                    "url",
+                    ""
+                )
+            })
+
+    if not evidence:
+        return {
+            "status": "UNVERIFIED",
+            "reason": "No usable fact-check evidence was found.",
+            "evidence": []
+        }
+
+    false_words = [
+        "false",
+        "fake",
+        "incorrect",
+        "misleading",
+        "wrong",
+        "pants on fire"
+    ]
+
+    true_words = [
+        "true",
+        "correct",
+        "accurate"
+    ]
+
+    for item in evidence:
+
+        rating = item["rating"].lower()
+
+        if any(word in rating for word in false_words):
+
+            return {
+                "status": "FALSE",
+                "reason": "A fact-checking source rated this claim as false or misleading.",
+                "evidence": evidence
+            }
+
+    for item in evidence:
+
+        rating = item["rating"].lower()
+
+        if any(word in rating for word in true_words):
+
+            return {
+                "status": "VERIFIED",
+                "reason": "A fact-checking source rated this claim as true or accurate.",
+                "evidence": evidence
+            }
+
+    return {
+        "status": "UNVERIFIED",
+        "reason": "Fact-check results were found, but the rating was inconclusive.",
+        "evidence": evidence
+    }
 
 def get_probabilities(transformed_text):
     """Returns (real_probability, fake_probability, prediction) as percentages / label."""
@@ -411,8 +548,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### About")
     st.write(
-        "This app uses a trained Machine Learning model to classify "
-        "news articles as **Real** or **Fake** based on their text content."
+        "This app uses Machine Learning to classify news as **Real** or **Fake** "
+"and checks available fact-checking sources for additional evidence."
     )
 
     st.markdown("---")
@@ -603,7 +740,109 @@ if predict_button:
                     """,
                     unsafe_allow_html=True,
                 )
+        # ====================================================
+        # FACT CHECKING
+        # ====================================================
 
+        st.markdown(
+            '<div class="section-title">🔎 Fact Checking</div>',
+            unsafe_allow_html=True
+        )
+
+        # Use title as the main claim
+        if title.strip():
+            fact_check_claim = title.strip()
+        else:
+            fact_check_claim = article.strip()[:500]
+
+        with st.spinner("Checking fact-checking sources..."):
+
+            fact_result = fact_check_news(fact_check_claim)
+
+        status = fact_result["status"]
+
+        # Display status
+        if status == "VERIFIED":
+            st.success("✅ VERIFIED")
+
+        elif status == "FALSE":
+            st.error("❌ FALSE / MISLEADING")
+
+        else:
+            st.warning("⚠️ UNVERIFIED")
+
+        # Display reason
+        st.markdown(
+            f"""
+            <div class="info-box">
+                <b>Fact-Check Status:</b> {status}<br><br>
+                <b>Reason:</b> {fact_result["reason"]}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Display evidence
+        if fact_result["evidence"]:
+
+            st.markdown(
+                '<div class="section-title">📚 Fact-Check Evidence</div>',
+                unsafe_allow_html=True
+            )
+
+            for i, item in enumerate(
+                fact_result["evidence"],
+                1
+            ):
+
+                st.markdown(
+                    f"""
+                    <div class="stat-card"
+                         style="text-align:left; margin-bottom:15px;">
+
+                        <div class="stat-label">
+                            SOURCE {i}
+                        </div>
+
+                        <div style="
+                            font-size:18px;
+                            font-weight:600;
+                            margin:8px 0;
+                        ">
+                            {item["publisher"]}
+                        </div>
+
+                        <div style="
+                            color:#a5b4fc;
+                            margin-bottom:8px;
+                        ">
+                            Rating: {item["rating"]}
+                        </div>
+
+                        <div style="
+                            color:#d1d5db;
+                            margin-bottom:10px;
+                        ">
+                            {item["review_title"]}
+                        </div>
+
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                if item["url"]:
+                    st.link_button(
+                        "🔗 View Fact Check Source",
+                        item["url"]
+                    )
+
+        else:
+
+            st.info(
+                "No existing fact-check was found for this claim. "
+                "The claim should be treated as unverified."
+            )
     
 
 
